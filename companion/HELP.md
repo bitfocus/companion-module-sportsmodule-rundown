@@ -24,6 +24,24 @@ Uses the built-in Sports Module production cloud. Optional **Advanced: override 
 
 The rundown must already be **Go live** in the [Sports Module hub](https://commentator-dashboard.pages.dev/hub). This module does not start the show.
 
+## Live state variables
+
+Refreshed from the server about twice a second, so pause / resume / beat changes performed in the hub — or from another Companion — are reflected here too.
+
+| Variable            | Meaning                                     |
+| ------------------- | ------------------------------------------- |
+| `doc_id`            | Selected rundown id                         |
+| `rundown_title`     | Selected rundown title                      |
+| `live_active`       | `true` / `false` — rundown is live          |
+| `live_paused`       | `true` / `false` — live rundown is paused   |
+| `live_current_idx`  | Current live beat index (empty if not live) |
+| `live_current_name` | Current beat label, e.g. `VTR — Cam 1`      |
+| `last_action`       | Last **successful** transport action        |
+| `last_error`        | Last error message (empty after a success)  |
+
+**Feedbacks:** `Selected rundown is live`, `Selected rundown is paused`
+**Presets:** **Transport** → Previous / Pause / Resume / Next (Pause lights amber while paused)
+
 ## Cue variables
 
 | Variable              | Meaning                           |
@@ -37,3 +55,5 @@ The rundown must already be **Go live** in the [Sports Module hub](https://comme
 
 **Feedback:** `Last cue is number`  
 **Presets:** **Companion cues** → Cue 1–16
+
+Cue variables are cleared when you switch rundown, and when a show ends and goes live again — so a Cue button never stays lit on a cue from a previous show.

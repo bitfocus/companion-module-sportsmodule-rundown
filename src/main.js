@@ -7,6 +7,14 @@ const UpgradeScripts = require('./upgrades')
 const Defaults = require('./defaults')
 
 const CUE_POLL_MS = 500
+// Fallback path only: the poll_cues op carries no live state, so every Nth tick
+// also refreshes the doc list. The REST path gets live state on every tick.
+const LIVE_POLL_EVERY = 4
+// Beats are ~2 KB; refetch them at most this often when the doc's updated_at moves.
+const BEATS_REFETCH_MS = 5000
+// Columns of the rundown_documents row the live poll needs.
+const DOC_COLS = 'id,title,live_active,live_paused,live_current_idx,updated_at,environment_id'
+const CUE_COLS = 'seq,cue_number,cue_name,line_text,trigger_id,event_id,offset_sec,created_at'
 
 class SportsModuleRundownInstance extends InstanceBase {
 	constructor(internal) {
@@ -18,7 +26,20 @@ class SportsModuleRundownInstance extends InstanceBase {
 		this.refreshToken = ''
 		this.tokenExpiresAt = 0
 		this.cueAfterSeq = null
-		this.cuePollTimer = null
+		this.pollTimer = null
+		this.pollTicks = 0
+		this.lastLivePublish = null
+		this.lastChoiceSig = ''
+		this.restAvailable = true
+		this.restWarned = false
+		this.beats = []
+		this.beatsDocId = ''
+		this.beatsUpdatedAt = ''
+		this.beatsFetchedAt = 0
+		this.columns = []
+		this.columnsEnvId = ''
+		this.prevLiveActive = null
+		this.prevPublishedDocId = ''
 		this.lastCueNumber = 0
 		this.lastCueName = ''
 		this.lastCueEventId = ''
@@ -39,7 +60,7 @@ class SportsModuleRundownInstance extends InstanceBase {
 	}
 
 	async destroy() {
-		this.stopCuePoll()
+		this.stopPolling()
 		this.accessToken = ''
 		this.refreshToken = ''
 		this.docs = []
@@ -48,7 +69,9 @@ class SportsModuleRundownInstance extends InstanceBase {
 	async configUpdated(config, secrets) {
 		this.config = config || {}
 		this.secrets = secrets || {}
-		this.cueAfterSeq = null
+		this.lastLivePublish = null
+		// A rundown swap must not carry the previous show's cue over.
+		this.resetCueState()
 		await this.connectAndLoad()
 	}
 
@@ -148,7 +171,7 @@ class SportsModuleRundownInstance extends InstanceBase {
 	}
 
 	async connectAndLoad() {
-		this.stopCuePoll()
+		this.stopPolling()
 		const url = this.baseUrl()
 		const anon = this.anonKey()
 		const email = String((this.config && this.config.email) || '').trim()
@@ -167,14 +190,25 @@ class SportsModuleRundownInstance extends InstanceBase {
 
 		try {
 			await this.ensureAuth(true)
+			// Re-probe direct table access on every (re)connect.
+			this.restAvailable = true
+			this.restWarned = false
+			this.resetCueState()
 			await this.refreshDocList()
+			await this.primeCueSeq()
+			await this.refreshBeats(true)
+			// Seed the transition detector so the first publish is not read as a
+			// doc change and does not re-prime the seq we just fetched.
+			this.prevPublishedDocId = this.selectedDocId()
+			this.prevLiveActive = null
 			this.updateActions()
 			this.updateFeedbacks()
 			this.updatePresets()
-			this.setLiveVariables(null, '')
+			this.publishLiveState()
 			this.setCueVariables()
+			this.setVariableValues({ last_action: '', last_error: '' })
 			this.updateStatus(InstanceStatus.Ok)
-			this.startCuePoll()
+			this.startPolling()
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e)
 			this.setVariableValues({ last_error: msg })
@@ -231,11 +265,13 @@ class SportsModuleRundownInstance extends InstanceBase {
 
 	updateVariableDefinitions() {
 		this.setVariableDefinitions([
+			{ variableId: 'doc_id', name: 'Selected rundown id' },
 			{ variableId: 'rundown_title', name: 'Selected rundown title' },
 			{ variableId: 'live_active', name: 'Selected rundown is live (true/false)' },
 			{ variableId: 'live_paused', name: 'Selected rundown is paused (true/false)' },
-			{ variableId: 'doc_id', name: 'Selected rundown id' },
-			{ variableId: 'last_action', name: 'Last transport action' },
+			{ variableId: 'live_current_idx', name: 'Current live beat index' },
+			{ variableId: 'live_current_name', name: 'Current live beat name' },
+			{ variableId: 'last_action', name: 'Last successful transport action' },
 			{ variableId: 'last_error', name: 'Last error message' },
 			{ variableId: 'last_cue_number', name: 'Last fired cue number (1-16)' },
 			{ variableId: 'last_cue_name', name: 'Last fired cue name' },
@@ -246,17 +282,61 @@ class SportsModuleRundownInstance extends InstanceBase {
 		])
 	}
 
-	setLiveVariables(live, action) {
-		const docId = this.config && this.config.docId ? String(this.config.docId) : ''
-		const fromList = (this.docs || []).find((d) => String(d.id) === docId)
-		this.setVariableValues({
-			rundown_title: (live && live.title) || (fromList && fromList.title) || '',
-			live_active: live ? String(!!live.liveActive) : fromList ? String(!!fromList.liveActive) : 'false',
-			live_paused: live ? String(!!live.livePaused) : fromList ? String(!!fromList.livePaused) : 'false',
-			doc_id: (live && live.id) || docId,
-			last_action: action || '',
-			last_error: '',
-		})
+	// this.docs is the single mirror of server-reported live state: the list poll
+	// replaces it wholesale, transport replies merge into it.
+	liveStateFor(docId) {
+		const id = String(docId || '')
+		if (!id) return null
+		return (this.docs || []).find((d) => String(d.id) === id) || null
+	}
+
+	publishLiveState() {
+		const docId = this.selectedDocId()
+		const live = this.liveStateFor(docId)
+		const active = !!(live && live.liveActive)
+
+		// "Reset to top" is performed in the hub by ending the show and going live
+		// again, so a false->true transition is the signal to drop the previous
+		// show's cue. A doc swap is the other boundary.
+		const docChanged = docId !== this.prevPublishedDocId
+		const wentLive = this.prevLiveActive === false && active
+		this.prevLiveActive = active
+		this.prevPublishedDocId = docId
+		if (wentLive || docChanged) {
+			this.resetCueState()
+			this.primeCueSeq().catch(() => {})
+		}
+
+		const values = {
+			rundown_title: (live && live.title) || '',
+			live_active: String(active),
+			live_paused: String(!!(live && live.livePaused)),
+			live_current_idx: live && live.liveCurrentIdx != null ? String(live.liveCurrentIdx) : '',
+			live_current_name: this.currentBeatName(live),
+			doc_id: docId,
+		}
+
+		// Runs on every 500 ms tick; stay silent when nothing moved.
+		const sig = JSON.stringify(values)
+		if (sig === this.lastLivePublish) return
+		this.lastLivePublish = sig
+
+		this.setVariableValues(values)
+		this.checkFeedbacks('live_is_paused', 'live_is_active')
+	}
+
+	// Cue state is per-show: clearing it must also drop the feedback, or a Cue button
+	// stays lit on a cue that fired in a previous show.
+	resetCueState() {
+		this.cueAfterSeq = null
+		this.lastCueNumber = 0
+		this.lastCueName = ''
+		this.lastCueEventId = ''
+		this.lastCueLineText = ''
+		this.lastCueTriggerId = ''
+		this.lastCueAt = ''
+		this.setCueVariables()
+		this.checkFeedbacks('last_cue_is')
 	}
 
 	setCueVariables() {
@@ -299,70 +379,318 @@ class SportsModuleRundownInstance extends InstanceBase {
 		return data
 	}
 
-	async refreshDocList() {
+	// Direct PostgREST read. The edge function is the documented contract, but it
+	// cannot serve live state cheaply (op:'list' returns every doc in the org) and
+	// exposes no beat list at all. Reading the tables straight gives both in one
+	// ~140 B request — at the cost of depending on table names and RLS that are not
+	// a published contract, so every caller must tolerate restUnavailable().
+	async callRest(pathAndQuery) {
+		await this.ensureAuth(false)
+		const url = `${this.baseUrl()}/rest/v1/${pathAndQuery}`
+		const anon = this.anonKey()
+
+		const doFetch = async (token) =>
+			fetch(url, {
+				headers: {
+					apikey: anon,
+					Authorization: `Bearer ${token}`,
+					Accept: 'application/json',
+				},
+			})
+
+		let res = await doFetch(this.accessToken)
+		if (res.status === 401) {
+			await this.ensureAuth(true)
+			res = await doFetch(this.accessToken)
+		}
+		if (!res.ok) {
+			const err = new Error(`REST HTTP ${res.status}`)
+			err.status = res.status
+			throw err
+		}
+		return res.json()
+	}
+
+	// RLS may not grant every operator the table access this account has. Degrade to
+	// the edge-function path rather than breaking; re-probed on the next connect.
+	restUnavailable(e) {
+		const status = e && e.status
+		if (status === 401 || status === 403 || status === 404 || status === 406) {
+			this.restAvailable = false
+			if (!this.restWarned) {
+				this.restWarned = true
+				this.log('info', `Direct table read unavailable (HTTP ${status}); using slower edge-function polling`)
+			}
+			return true
+		}
+		return false
+	}
+
+	async fetchDocs() {
 		const data = await this.callCompanion({ op: 'list' })
-		this.docs = Array.isArray(data.docs) ? data.docs : []
+		return Array.isArray(data.docs) ? data.docs : []
+	}
+
+	async refreshDocList() {
+		this.docs = await this.fetchDocs()
+		this.lastChoiceSig = this.choiceSignature()
 		this.log('info', `Loaded ${this.docs.length} rundown(s)`)
 		this.updateActions()
+	}
+
+	// Rebuilding action/config dropdowns on every live poll would churn the UI, so
+	// only do it when the visible choices actually changed.
+	choiceSignature() {
+		return (this.docs || []).map((d) => `${d.id}|${d.title}|${!!d.liveActive}|${!!d.livePaused}`).join('\n')
+	}
+
+	async refreshLiveState() {
+		this.docs = await this.fetchDocs()
+		this.publishLiveState()
+		const sig = this.choiceSignature()
+		if (sig !== this.lastChoiceSig) {
+			this.lastChoiceSig = sig
+			this.updateActions()
+		}
 	}
 
 	selectedDocId() {
 		return String((this.config && this.config.docId) || '').trim()
 	}
 
-	stopCuePoll() {
-		if (this.cuePollTimer) {
-			clearInterval(this.cuePollTimer)
-			this.cuePollTimer = null
+	// Seed cueAfterSeq with the current max so the backlog is discarded, matching the
+	// edge-function behaviour. seq is monotonic per document and does NOT reset when a
+	// show restarts, so resetting to 0 would replay the entire history.
+	async primeCueSeq() {
+		const docId = this.selectedDocId()
+		this.cueAfterSeq = null
+		if (!docId || !this.restAvailable) return
+		try {
+			const rows = await this.callRest(
+				`rundown_companion_cue_events?document_id=eq.${encodeURIComponent(docId)}&select=seq&order=seq.desc&limit=1`,
+			)
+			this.cueAfterSeq = rows && rows.length ? Math.floor(Number(rows[0].seq) || 0) : 0
+		} catch (e) {
+			if (!this.restUnavailable(e)) throw e
+		}
+	}
+
+	async refreshBeats(force) {
+		const docId = this.selectedDocId()
+		if (!docId || !this.restAvailable) return
+		if (!force && Date.now() - this.beatsFetchedAt < BEATS_REFETCH_MS) return
+		try {
+			const rows = await this.callRest(
+				`rundown_documents?id=eq.${encodeURIComponent(docId)}&select=updated_at,environment_id,events`,
+			)
+			const row = rows && rows[0]
+			if (!row) return
+			this.beats = Array.isArray(row.events) ? row.events : []
+			this.beatsDocId = docId
+			this.beatsUpdatedAt = String(row.updated_at || '')
+			this.beatsFetchedAt = Date.now()
+			await this.refreshColumns(row.environment_id)
+		} catch (e) {
+			if (!this.restUnavailable(e)) throw e
+		}
+	}
+
+	// Cell order comes from the environment's column definitions, not the cells object.
+	async refreshColumns(envId) {
+		const id = String(envId || '')
+		if (!id || id === this.columnsEnvId || !this.restAvailable) return
+		try {
+			const rows = await this.callRest(`rundown_environments?id=eq.${encodeURIComponent(id)}&select=settings`)
+			const settings = (rows && rows[0] && rows[0].settings) || {}
+			const cols = Array.isArray(settings.columns) ? settings.columns.slice() : []
+			cols.sort((a, b) => (Number(a.sortOrder) || 0) - (Number(b.sortOrder) || 0))
+			this.columns = cols
+			this.columnsEnvId = id
+		} catch (e) {
+			if (!this.restUnavailable(e)) throw e
+		}
+	}
+
+	// Mirrors the hub's own label convention, as observed in the cue log:
+	// blockId "studio" + cells {Gæster:"Jan", Cam:"Cam 2"} -> "STUDIO — Jan".
+	// Cells win over `what`/`cue`; no observed beat had both, so if one ever formats
+	// differently from the hub, this precedence is the single line to change.
+	elementLabel(el, idx) {
+		if (!el) return ''
+		if (el.kind === 'chapter') return String(el.title || '') || `Item ${idx + 1}`
+
+		const cells = el.cells && typeof el.cells === 'object' ? el.cells : {}
+		let cell = ''
+		for (const col of this.columns) {
+			const v = String(cells[col.id] || '').trim()
+			if (v) {
+				cell = v
+				break
+			}
+		}
+		// No column definitions cached (or none matched): fall back to insertion order.
+		if (!cell) {
+			cell = String(Object.values(cells).find((v) => String(v || '').trim()) || '').trim()
+		}
+
+		const detail = cell || String(el.what || '').trim() || String(el.cue || '').trim()
+		const block = String(el.blockId || '')
+			.trim()
+			.toUpperCase()
+		if (block && detail) return `${block} — ${detail}`
+		return block || detail || `Item ${idx + 1}`
+	}
+
+	currentBeatName(live) {
+		if (!live) return ''
+		const idx = Math.floor(Number(live.liveCurrentIdx))
+		// -1 is the server's "not live / no position" value.
+		if (!Number.isFinite(idx) || idx < 0) return ''
+		if (this.beatsDocId !== this.selectedDocId()) return ''
+		if (idx >= this.beats.length) return ''
+		return this.elementLabel(this.beats[idx], idx)
+	}
+
+	stopPolling() {
+		if (this.pollTimer) {
+			clearInterval(this.pollTimer)
+			this.pollTimer = null
 		}
 		this.pollInFlight = false
 	}
 
-	startCuePoll() {
-		this.stopCuePoll()
+	startPolling() {
+		this.stopPolling()
 		const docId = this.selectedDocId()
 		if (!docId) return
-		this.cuePollTimer = setInterval(() => {
-			this.pollCues().catch((e) => {
+		this.pollTicks = 0
+		this.pollTimer = setInterval(() => {
+			this.pollTick().catch((e) => {
 				const msg = e instanceof Error ? e.message : String(e)
-				this.log('debug', `cue poll: ${msg}`)
+				this.log('debug', `poll: ${msg}`)
 			})
 		}, CUE_POLL_MS)
-		this.pollCues().catch(() => {})
+		this.pollTick().catch(() => {})
+	}
+
+	// One timer, one request in flight: a second interval would let two calls race on
+	// a token refresh in ensureAuth().
+	async pollTick() {
+		if (this.pollInFlight) return
+		this.pollInFlight = true
+		try {
+			if (this.restAvailable) {
+				await this.pollRest()
+			}
+			// Not an else: pollRest() may have just given up on the REST path.
+			if (!this.restAvailable) {
+				await this.pollCues()
+				if (this.pollTicks % LIVE_POLL_EVERY === 0) {
+					await this.refreshLiveState()
+				}
+			}
+			this.pollTicks++
+		} finally {
+			this.pollInFlight = false
+		}
+	}
+
+	// The hot path: one request carries live state and any new cue events.
+	async pollRest() {
+		const docId = this.selectedDocId()
+		if (!docId) return
+		const id = encodeURIComponent(docId)
+		const after = this.cueAfterSeq != null ? this.cueAfterSeq : 0
+		const query =
+			`rundown_documents?id=eq.${id}` +
+			`&select=${DOC_COLS},rundown_companion_cue_events(${CUE_COLS})` +
+			`&rundown_companion_cue_events.seq=gt.${after}` +
+			`&rundown_companion_cue_events.order=seq.asc`
+
+		let rows
+		try {
+			rows = await this.callRest(query)
+		} catch (e) {
+			if (this.restUnavailable(e)) return
+			throw e
+		}
+
+		const row = rows && rows[0]
+		if (!row) return
+
+		// Feed the same camelCase mirror the edge-function path writes, so
+		// liveStateFor()/publishLiveState() stay unchanged.
+		const live = {
+			id: String(row.id),
+			title: row.title,
+			liveActive: !!row.live_active,
+			livePaused: !!row.live_paused,
+			liveCurrentIdx: row.live_current_idx,
+			updatedAt: row.updated_at,
+		}
+		const known = (this.docs || []).some((d) => String(d.id) === live.id)
+		this.docs = known
+			? (this.docs || []).map((d) => (String(d.id) === live.id ? { ...d, ...live } : d))
+			: [...(this.docs || []), live]
+
+		// Beats only change when the doc is edited; the name resolves from cache on
+		// every idx move, so this stays off the hot path.
+		if (String(row.updated_at || '') !== this.beatsUpdatedAt || this.beatsDocId !== docId) {
+			await this.refreshBeats(this.beatsDocId !== docId)
+		}
+
+		this.publishLiveState()
+
+		const events = Array.isArray(row.rundown_companion_cue_events) ? row.rundown_companion_cue_events : []
+		if (this.cueAfterSeq == null) {
+			// Priming failed earlier; adopt the current max rather than replaying.
+			this.cueAfterSeq = events.length ? Math.floor(Number(events[events.length - 1].seq) || 0) : 0
+			return
+		}
+		if (!events.length) return
+
+		for (const ev of events) {
+			this.applyCueEvent({
+				cueNumber: ev.cue_number,
+				cueName: ev.cue_name,
+				eventId: ev.event_id,
+				lineText: ev.line_text,
+				triggerId: ev.trigger_id,
+				createdAt: ev.created_at,
+			})
+		}
+		const last = events[events.length - 1]
+		this.cueAfterSeq = Math.max(this.cueAfterSeq, Math.floor(Number(last && last.seq) || 0))
+		this.checkFeedbacks('last_cue_is')
 	}
 
 	async pollCues() {
 		const docId = this.selectedDocId()
-		if (!docId || this.pollInFlight) return
-		this.pollInFlight = true
-		try {
-			const body = { op: 'poll_cues', docId }
-			if (this.cueAfterSeq != null) {
-				body.afterSeq = this.cueAfterSeq
-			}
-			const data = await this.callCompanion(body)
-			const latestSeq = Math.max(0, Math.floor(Number(data.latestSeq) || 0))
-			const events = Array.isArray(data.events) ? data.events : []
-
-			if (this.cueAfterSeq == null) {
-				this.cueAfterSeq = latestSeq
-				return
-			}
-
-			if (!events.length) {
-				if (latestSeq > this.cueAfterSeq) this.cueAfterSeq = latestSeq
-				return
-			}
-
-			for (const ev of events) {
-				this.applyCueEvent(ev)
-			}
-			const last = events[events.length - 1]
-			this.cueAfterSeq = Math.max(this.cueAfterSeq, Math.floor(Number(last && last.seq) || 0), latestSeq)
-			this.checkFeedbacks('last_cue_is')
-		} finally {
-			this.pollInFlight = false
+		if (!docId) return
+		const body = { op: 'poll_cues', docId }
+		if (this.cueAfterSeq != null) {
+			body.afterSeq = this.cueAfterSeq
 		}
+		const data = await this.callCompanion(body)
+		const latestSeq = Math.max(0, Math.floor(Number(data.latestSeq) || 0))
+		const events = Array.isArray(data.events) ? data.events : []
+
+		if (this.cueAfterSeq == null) {
+			this.cueAfterSeq = latestSeq
+			return
+		}
+
+		if (!events.length) {
+			if (latestSeq > this.cueAfterSeq) this.cueAfterSeq = latestSeq
+			return
+		}
+
+		for (const ev of events) {
+			this.applyCueEvent(ev)
+		}
+		const last = events[events.length - 1]
+		this.cueAfterSeq = Math.max(this.cueAfterSeq, Math.floor(Number(last && last.seq) || 0), latestSeq)
+		this.checkFeedbacks('last_cue_is')
 	}
 
 	applyCueEvent(ev) {
@@ -403,11 +731,74 @@ class SportsModuleRundownInstance extends InstanceBase {
 					return want >= 1 && want <= 16 && this.lastCueNumber === want
 				},
 			},
+			live_is_active: {
+				type: 'boolean',
+				name: 'Selected rundown is live',
+				description: 'True while the selected rundown is live (paused or not)',
+				defaultStyle: {
+					bgcolor: combineRgb(0, 160, 60),
+					color: combineRgb(255, 255, 255),
+				},
+				options: [],
+				callback: () => {
+					const live = this.liveStateFor(this.selectedDocId())
+					return !!(live && live.liveActive)
+				},
+			},
+			live_is_paused: {
+				type: 'boolean',
+				name: 'Selected rundown is paused',
+				description: 'True while the selected rundown is live and paused',
+				defaultStyle: {
+					bgcolor: combineRgb(200, 140, 0),
+					color: combineRgb(255, 255, 255),
+				},
+				options: [],
+				callback: () => {
+					const live = this.liveStateFor(this.selectedDocId())
+					return !!(live && live.livePaused)
+				},
+			},
 		})
 	}
 
 	updatePresets() {
 		const presets = {}
+
+		const transport = [
+			{ id: 'previous', label: 'Previous', feedbacks: [] },
+			{ id: 'pause', label: 'Pause', feedbacks: ['live_is_paused'] },
+			{ id: 'resume', label: 'Resume', feedbacks: [] },
+			{ id: 'next', label: 'Next', feedbacks: [] },
+		]
+		for (const t of transport) {
+			presets[`transport_${t.id}`] = {
+				type: 'button',
+				category: 'Transport',
+				name: t.label,
+				style: {
+					text: t.label,
+					size: '18',
+					color: combineRgb(255, 255, 255),
+					bgcolor: combineRgb(30, 30, 30),
+				},
+				steps: [
+					{
+						down: [{ actionId: t.id, options: { docId: this.selectedDocId() } }],
+						up: [],
+					},
+				],
+				feedbacks: t.feedbacks.map((feedbackId) => ({
+					feedbackId,
+					options: {},
+					style: {
+						bgcolor: combineRgb(200, 140, 0),
+						color: combineRgb(255, 255, 255),
+					},
+				})),
+			}
+		}
+
 		for (let i = 1; i <= 16; i++) {
 			presets[`cue_${i}`] = {
 				type: 'button',
@@ -459,6 +850,7 @@ class SportsModuleRundownInstance extends InstanceBase {
 				callback: async () => {
 					try {
 						await this.refreshDocList()
+						this.publishLiveState()
 						this.updateStatus(InstanceStatus.Ok)
 						this.setVariableValues({ last_action: 'refresh_list', last_error: '' })
 					} catch (e) {
@@ -518,13 +910,17 @@ class SportsModuleRundownInstance extends InstanceBase {
 							}
 						: d,
 				)
+				this.lastChoiceSig = this.choiceSignature()
 			}
-			this.setLiveVariables(data.live || null, action)
+			// A reply without `live` publishes nothing new; the live poll corrects it
+			// rather than us re-asserting the pre-action cache.
+			this.publishLiveState()
+			this.setVariableValues({ last_action: action, last_error: '' })
 			this.updateActions()
 			this.updateStatus(InstanceStatus.Ok)
 		} catch (e) {
 			const msg = e instanceof Error ? e.message : String(e)
-			this.setVariableValues({ last_error: msg, last_action: action })
+			this.setVariableValues({ last_error: msg })
 			this.log('error', `${action}: ${msg}`)
 		}
 	}

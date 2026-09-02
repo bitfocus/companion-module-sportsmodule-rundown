@@ -1,4 +1,4 @@
-# Sports Module Rundown — Companion module (v0.3)
+# Sports Module Rundown — Companion module
 
 Bitfocus Companion connection for Sports Module Rundown.
 
@@ -11,14 +11,16 @@ Bitfocus Companion connection for Sports Module Rundown.
 - Pick a **rundown**
 - Actions: **Previous / Pause / Resume / Next** (+ refresh list)
 - **Cue poll:** variables + feedbacks + Cue 1–16 presets
+- **Live state poll:** live / paused / title / beat index + name track the server (~0.5 s), so pause, resume and beat moves from the hub or another Companion are reflected here
 
 ## Build
 
+Requires **Node 22** and **Yarn 4** (via Corepack).
+
 ```bash
 cd companion-module-sportsmodule-rundown
-corepack enable
 yarn install
 yarn package
 ```
 
-Install `sportsmodule-rundown-0.3.0.tgz` via Companion → Import module package.
+Install `sportsmodule-rundown-x.x.x.tgz` via Companion → Import module package.

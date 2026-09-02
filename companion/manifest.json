@@ -5,7 +5,7 @@
 	"name": "Sports Module Rundown",
 	"shortname": "SM Rundown",
 	"description": "Drive a Sports Module Rundown from Companion (transport + Cue 1–16 variables/feedbacks).",
-	"version": "0.3.0",
+	"version": "1.0.0",
 	"license": "MIT",
 	"repository": "git+https://github.com/bitfocus/companion-module-sportsmodule-rundown.git",
 	"bugs": "https://github.com/bitfocus/companion-module-sportsmodule-rundown/issues",
