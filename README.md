@@ -2,6 +2,8 @@
 
 Bitfocus Companion connection for Sports Module Rundown.
 
+**Service:** <https://commentator-dashboard.pages.dev/hub> — sign in there to create rundowns and **Go live**; this module only drives a show that is already live.
+
 ## What it does
 
 - Login with **org member** email + **masked** password  

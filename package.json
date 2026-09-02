@@ -1,0 +1,22 @@
+{
+  "name": "sportsmodule-rundown",
+  "version": "0.3.0",
+  "main": "src/main.js",
+  "scripts": {
+    "package": "companion-module-build"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jesperrau/commentator-dashboard.git"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@companion-module/base": "^1.13.6"
+  },
+  "devDependencies": {
+    "@companion-module/tools": "^2.1.1"
+  }
+}
