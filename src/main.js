@@ -205,8 +205,7 @@ class SportsModuleRundownInstance extends InstanceBase {
 		const data = await res.json().catch(() => ({}))
 		if (!res.ok || !data.access_token) {
 			throw new Error(
-				(data && (data.error_description || data.msg || data.error)) ||
-					`Login failed (HTTP ${res.status})`,
+				(data && (data.error_description || data.msg || data.error)) || `Login failed (HTTP ${res.status})`,
 			)
 		}
 		this.accessToken = String(data.access_token)
@@ -359,11 +358,7 @@ class SportsModuleRundownInstance extends InstanceBase {
 				this.applyCueEvent(ev)
 			}
 			const last = events[events.length - 1]
-			this.cueAfterSeq = Math.max(
-				this.cueAfterSeq,
-				Math.floor(Number(last && last.seq) || 0),
-				latestSeq,
-			)
+			this.cueAfterSeq = Math.max(this.cueAfterSeq, Math.floor(Number(last && last.seq) || 0), latestSeq)
 			this.checkFeedbacks('last_cue_is')
 		} finally {
 			this.pollInFlight = false
@@ -380,10 +375,7 @@ class SportsModuleRundownInstance extends InstanceBase {
 		this.lastCueTriggerId = String(ev.triggerId || '')
 		this.lastCueAt = String(ev.createdAt || '')
 		this.setCueVariables()
-		this.log(
-			'info',
-			`Cue ${this.lastCueNumber}${this.lastCueName ? ` (${this.lastCueName})` : ''} fired`,
-		)
+		this.log('info', `Cue ${this.lastCueNumber}${this.lastCueName ? ` (${this.lastCueName})` : ''} fired`)
 	}
 
 	updateFeedbacks() {

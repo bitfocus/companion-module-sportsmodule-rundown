@@ -14,26 +14,26 @@ Uses the built-in Sports Module production cloud. Optional **Advanced: override 
 
 ## Actions
 
-| Action | What it does |
-|--------|----------------|
-| Previous | Previous main beat |
-| Pause | Pause live |
-| Resume | Resume from pause |
-| Next | Next main beat |
+| Action               | What it does                               |
+| -------------------- | ------------------------------------------ |
+| Previous             | Previous main beat                         |
+| Pause                | Pause live                                 |
+| Resume               | Resume from pause                          |
+| Next                 | Next main beat                             |
 | Refresh rundown list | Reload titles / live flags into the picker |
 
 The rundown must already be **Go live** in the [Sports Module hub](https://commentator-dashboard.pages.dev/hub). This module does not start the show.
 
 ## Cue variables
 
-| Variable | Meaning |
-|----------|---------|
-| `last_cue_number` | 1–16 |
-| `last_cue_name` | Environment cue name (or `Cue N`) |
-| `last_cue_line_text` | Line summary |
-| `last_cue_event_id` | Line id |
-| `last_cue_trigger_id` | Trigger id |
-| `last_cue_at` | Fire time (ISO) |
+| Variable              | Meaning                           |
+| --------------------- | --------------------------------- |
+| `last_cue_number`     | 1–16                              |
+| `last_cue_name`       | Environment cue name (or `Cue N`) |
+| `last_cue_line_text`  | Line summary                      |
+| `last_cue_event_id`   | Line id                           |
+| `last_cue_trigger_id` | Trigger id                        |
+| `last_cue_at`         | Fire time (ISO)                   |
 
 **Feedback:** `Last cue is number`  
 **Presets:** **Companion cues** → Cue 1–16

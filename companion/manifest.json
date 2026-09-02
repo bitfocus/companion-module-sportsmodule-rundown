@@ -1,21 +1,34 @@
 {
-  "$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
-  "id": "sportsmodule-rundown",
-  "name": "Sports Module Rundown",
-  "shortname": "SM Rundown",
-  "description": "Drive a Sports Module Rundown from Companion (transport + Cue 1–16 variables/feedbacks).",
-  "version": "0.3.0",
-  "license": "MIT",
-  "repository": "git+https://github.com/jesperrau/commentator-dashboard.git",
-  "bugs": "https://github.com/jesperrau/commentator-dashboard/issues",
-  "runtime": {
-    "type": "node18",
-    "api": "nodejs-ipc",
-    "apiVersion": "0.0.0",
-    "entrypoint": "../src/main.js"
-  },
-  "legacyIds": [],
-  "manufacturer": "Sports Module",
-  "products": ["Rundown"],
-  "keywords": ["rundown", "broadcast", "sportsmodule"]
+	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
+	"type": "connection",
+	"id": "sportsmodule-rundown",
+	"name": "Sports Module Rundown",
+	"shortname": "SM Rundown",
+	"description": "Drive a Sports Module Rundown from Companion (transport + Cue 1–16 variables/feedbacks).",
+	"version": "0.3.0",
+	"license": "MIT",
+	"repository": "git+https://github.com/bitfocus/companion-module-sportsmodule-rundown.git",
+	"bugs": "https://github.com/bitfocus/companion-module-sportsmodule-rundown/issues",
+	"maintainers": [
+		{
+			"name": "Andreas Thomsen",
+			"email": "mc-hauge@hotmail.com"
+		}
+	],
+	"runtime": {
+		"type": "node22",
+		"api": "nodejs-ipc",
+		"apiVersion": "0.0.0",
+		"entrypoint": "../src/main.js"
+	},
+	"legacyIds": [],
+	"manufacturer": "Sports Module",
+	"products": [
+		"Rundown"
+	],
+	"keywords": [
+		"rundown",
+		"broadcast",
+		"sportsmodule"
+	]
 }

@@ -1,22 +1,27 @@
 {
-  "name": "sportsmodule-rundown",
-  "version": "0.3.0",
-  "main": "src/main.js",
-  "scripts": {
-    "package": "companion-module-build"
-  },
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/jesperrau/commentator-dashboard.git"
-  },
-  "engines": {
-    "node": ">=18"
-  },
-  "dependencies": {
-    "@companion-module/base": "^1.13.6"
-  },
-  "devDependencies": {
-    "@companion-module/tools": "^2.1.1"
-  }
+	"name": "sportsmodule-rundown",
+	"version": "0.3.0",
+	"main": "src/main.js",
+	"scripts": {
+		"format": "prettier -w .",
+		"package": "companion-module-build"
+	},
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bitfocus/companion-module-sportsmodule-rundown.git"
+	},
+	"engines": {
+		"node": "^22.20",
+		"yarn": "^4"
+	},
+	"dependencies": {
+		"@companion-module/base": "^1.14.1"
+	},
+	"devDependencies": {
+		"@companion-module/tools": "^2.8.0",
+		"prettier": "^3.6.2"
+	},
+	"prettier": "@companion-module/tools/.prettierrc.json",
+	"packageManager": "yarn@4.17.0"
 }
